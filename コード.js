@@ -1,51 +1,74 @@
-function checkUpdates() {
-  // 1. シート名をここで指定（スプレッドシートのタブ名と合わせてください）
+function checkHapitasAllInOne() {
   const targetSheetName = "監視リスト"; 
-  
-  // 2. スプレッドシートとシートを取得
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const sheet = ss.getSheetByName(targetSheetName);
-
-  // シートが見つからない場合の安全策
+  
   if (!sheet) {
     console.error("エラー：シート「" + targetSheetName + "」が見つかりません。");
     return;
   }
 
-  // 3. データを取得
   const data = sheet.getDataRange().getValues();
   
-  for (let i = 1; i < data.length; i++) {
-    const isEnabled = data[i][0]; // A列: 監視ON/OFF
-    const url = data[i][2];       // C列: URL
-    const oldHash = data[i][3];    // D列: 前回のハッシュ
+  const options = {
+    "muteHttpExceptions": true,
+    "headers": {
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
+  };
 
-    if (!isEnabled || !url) continue;
+  for (let i = 1; i < data.length; i++) {
+    const isEnabled = data[i][0]; // A列
+    const url = data[i][2];       // C列
+    
+    if (!isEnabled || !url || !url.includes("hapitas.jp")) continue;
 
     try {
-      // サイトの情報を取得
-      const response = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
+      const response = UrlFetchApp.fetch(url, options);
       const html = response.getContentText();
-      
-      // ハッシュ値を生成
-      const newHash = Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, html)
-                      .map(byte => ("0" + (byte & 0xFF).toString(16)).slice(-2)).join("");
 
-      // 前回のハッシュと比較（GitHubのような変更検知）
-      if (oldHash && String(oldHash) !== newHash) {
-        sheet.getRange(i + 1, 5).setValue("✨新入荷あり！"); // E列
-        sheet.getRange(i + 1, 5).setBackground("#fff2cc");
+      // 指定されたタグでポイントを抽出
+      const pointText = Parser.data(html)
+        .from('<strong class="calculated_detail_point">')
+        .to('</strong>')
+        .build();
+
+      if (pointText) {
+        const currentPoint = Number(pointText.replace(/,/g, "").trim());
+        const oldPoint = Number(String(data[i][3]).replace(/,/g, "")); // D列
+        const bestPoint = Number(String(data[i][5]).replace(/,/g, "")); // F列
+
+        let statusMsg = "変動なし";
+        let bgColor = "#ffffff";
+
+        // 1. 前回比の判定
+        if (!isNaN(oldPoint) && oldPoint !== currentPoint) {
+          const diff = currentPoint - oldPoint;
+          statusMsg = (diff > 0 ? "📈 +" : "📉 ") + diff + "P";
+          bgColor = diff > 0 ? "#ccffcc" : "#ffcccc"; // 上がれば緑、下がれば赤
+        }
+
+        // 2. 過去最高値の判定（GitHubのリリースノートのように）
+        if (isNaN(bestPoint) || currentPoint > bestPoint) {
+          sheet.getRange(i + 1, 6).setValue(currentPoint); // F列に新記録保存
+          statusMsg = "⭐最高値更新！: " + currentPoint + "P";
+          bgColor = "#fff2cc"; // 最高値はゴールド
+        }
+
+        // 結果をシートに書き込み
+        sheet.getRange(i + 1, 5).setValue(statusMsg);
+        sheet.getRange(i + 1, 5).setBackground(bgColor);
+        sheet.getRange(i + 1, 4).setValue(currentPoint); // D列（次回比較用）
+
       } else {
-        sheet.getRange(i + 1, 5).setValue("変化なし");
-        sheet.getRange(i + 1, 5).setBackground("#ffffff");
+        sheet.getRange(i + 1, 5).setValue("タグ未検出");
       }
 
-      // 今回のハッシュをD列に保存
-      sheet.getRange(i + 1, 4).setValue(newHash);
-
     } catch (e) {
-      sheet.getRange(i + 1, 5).setValue("エラー: 取得失敗");
+      sheet.getRange(i + 1, 5).setValue("アクセス失敗");
     }
+    
+    Utilities.sleep(1000); // サーバー負荷軽減（1秒待機）
   }
-  console.log("チェックが完了しました。");
+  console.log("すべてのチェックが完了しました。");
 }
