@@ -1,4 +1,7 @@
-function checkHapitasAllInOne() {
+/**
+ * 統合型ウェブ監視システム（数値・差分監視、リンク化、更新日時記録付き）
+ */
+function megaWatcher() {
   const targetSheetName = "監視リスト"; 
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const sheet = ss.getSheetByName(targetSheetName);
@@ -9,6 +12,7 @@ function checkHapitasAllInOne() {
   }
 
   const data = sheet.getDataRange().getValues();
+  const userEmail = Session.getActiveUser().getEmail();
   
   const options = {
     "muteHttpExceptions": true,
@@ -18,57 +22,85 @@ function checkHapitasAllInOne() {
   };
 
   for (let i = 1; i < data.length; i++) {
-    const isEnabled = data[i][0]; // A列
-    const url = data[i][2];       // C列
+    const isEnabled = data[i][0]; 
+    const name = data[i][1];      
+    let url = data[i][2]; // C列       
+    const oldData = String(data[i][3]); // D列
+    const bestPt = Number(data[i][5]);  // F列
+    const startTag = data[i][6];  // G列
+    const endTag = data[i][7];    // H列
     
-    if (!isEnabled || !url || !url.includes("hapitas.jp")) continue;
+    if (!isEnabled || !url) continue;
+
+  // --- C列のURLを強制的にハイパーリンク化 ---
+    const currentCellValue = sheet.getRange(i + 1, 3).getFormula();
+    if (!currentCellValue.includes("HYPERLINK")) {
+      sheet.getRange(i + 1, 3).setFormula('=HYPERLINK("' + url + '","' + url + '")');
+    }
 
     try {
       const response = UrlFetchApp.fetch(url, options);
       const html = response.getContentText();
+      let currentContent = "";
+      let isNumericMode = false;
 
-      // 指定されたタグでポイントを抽出
-      const pointText = Parser.data(html)
-        .from('<strong class="calculated_detail_point">')
-        .to('</strong>')
-        .build();
-
-      if (pointText) {
-        const currentPoint = Number(pointText.replace(/,/g, "").trim());
-        const oldPoint = Number(String(data[i][3]).replace(/,/g, "")); // D列
-        const bestPoint = Number(String(data[i][5]).replace(/,/g, "")); // F列
-
-        let statusMsg = "変動なし";
-        let bgColor = "#ffffff";
-
-        // 1. 前回比の判定
-        if (!isNaN(oldPoint) && oldPoint !== currentPoint) {
-          const diff = currentPoint - oldPoint;
-          statusMsg = (diff > 0 ? "📈 +" : "📉 ") + diff + "P";
-          bgColor = diff > 0 ? "#ccffcc" : "#ffcccc"; // 上がれば緑、下がれば赤
+      // --- データ抽出 ---
+      if (startTag === "全文") {
+        currentContent = html.replace(/<[^>]*>?/gm, '').replace(/\s+/g, ' ').trim().substring(0, 10000);
+      } else if (startTag && endTag) {
+        const extracted = Parser.data(html).from(startTag).to(endTag).build();
+        if (extracted) {
+          currentContent = extracted.replace(/,/g, "").trim();
+          isNumericMode = !isNaN(currentContent) && currentContent !== "";
         }
-
-        // 2. 過去最高値の判定（GitHubのリリースノートのように）
-        if (isNaN(bestPoint) || currentPoint > bestPoint) {
-          sheet.getRange(i + 1, 6).setValue(currentPoint); // F列に新記録保存
-          statusMsg = "⭐最高値更新！: " + currentPoint + "P";
-          bgColor = "#fff2cc"; // 最高値はゴールド
-        }
-
-        // 結果をシートに書き込み
-        sheet.getRange(i + 1, 5).setValue(statusMsg);
-        sheet.getRange(i + 1, 5).setBackground(bgColor);
-        sheet.getRange(i + 1, 4).setValue(currentPoint); // D列（次回比較用）
-
-      } else {
-        sheet.getRange(i + 1, 5).setValue("タグ未検出");
       }
 
+      if (currentContent !== "") {
+        let statusMsg = "変動なし";
+        let bgColor = "#ffffff";
+        let shouldNotify = false;
+
+        // --- 比較ロジック ---
+        if (oldData !== "" && oldData !== currentContent) {
+          shouldNotify = true;
+          const now = new Date();
+          
+          // I列に更新日時を記録 (例: 12/29 15:30)
+          sheet.getRange(i + 1, 9).setValue(Utilities.formatDate(now, "JST", "MM/dd HH:mm"));
+
+          if (isNumericMode) {
+            const curNum = Number(currentContent);
+            const oldNum = Number(oldData);
+            const diff = curNum - oldNum;
+            statusMsg = (diff > 0 ? "📈 +" : "📉 ") + diff + "P (" + curNum + "P)";
+            bgColor = diff > 0 ? "#ccffcc" : "#ffcccc";
+
+            if (isNaN(bestPt) || curNum > bestPt) {
+              statusMsg = "⭐最高値更新!! (" + curNum + "P)";
+              bgColor = "#fff2cc";
+              sheet.getRange(i + 1, 6).setValue(curNum);
+            }
+          } else {
+            statusMsg = "✨更新あり";
+            bgColor = "#e1f5fe";
+          }
+        }
+
+        // --- シートへの書き込み ---
+        sheet.getRange(i + 1, 5).setValue(statusMsg);
+        sheet.getRange(i + 1, 5).setBackground(bgColor);
+        sheet.getRange(i + 1, 4).setValue(currentContent);
+
+        // --- 通知送信 ---
+        if (shouldNotify) {
+          const subject = `【監視通知】${name}：${statusMsg}`;
+          const body = `名前：${name}\n状況：${statusMsg}\nURL：${url}\n\n管理シート：\n${ss.getUrl()}`;
+          MailApp.sendEmail(userEmail, subject, body);
+        }
+      }
     } catch (e) {
       sheet.getRange(i + 1, 5).setValue("アクセス失敗");
     }
-    
-    Utilities.sleep(1000); // サーバー負荷軽減（1秒待機）
+    Utilities.sleep(1500);
   }
-  console.log("すべてのチェックが完了しました。");
 }
